@@ -45,19 +45,15 @@ class Agent:
         # 增強系統提示，要求輸出純文本格式，不使用markdown
         # 同時定義 Thought/Action/Observation 格式
         enhanced_prompt = system_prompt + \
-            "\n\nCRITICAL OUTPUT FORMATTING RULES:\n" + \
-            "1. ABSOLUTELY NO markdown formatting: DO NOT use #, ##, ###, **, __, ~~ , -, *, +\n" + \
-            "2. ABSOLUTELY NO special symbols that terminal cannot render: NO bullet points, NO arrows, NO brackets\n" + \
-            "3. Write ONLY plain ASCII text and simple line breaks\n" + \
-            "4. For lists, write as: Number one: ..., Number two: ..., etc\n" + \
-            "5. For emphasis, use CAPS LOCK or write emphasis in parentheses (IMPORTANT: ...)\n" + \
-            "6. Use only: periods, commas, colons, parentheses, numbers, and standard letters\n" + \
-            "7. Every output MUST be safe to display in a terminal without any rendering issues\n" + \
-            "\n\nRESPONSE FORMAT:\n" + \
-            "Use this exact format for your thinking and actions:\n" + \
-            "Thought: (explain your thinking here)\n" + \
-            "Action: Search[query text here] OR Final Answer\n" + \
-            "Keep this format consistent throughout."
+            "\n\nSTRICT OUTPUT CONTRACT:\n" + \
+            "Return ONLY plain text and ONLY these lines:\n" + \
+            "Line 1: Thought: <your reasoning>\n" + \
+            "Line 2: Action: Search[<single search query>] OR Action: Final Answer\n" + \
+            "Optional line 3 (only when line 2 is Action: Final Answer): Answer: <final answer>\n" + \
+            "Do not output any other prefixes such as Final Answer:, Observation:, Plan:, or Note:.\n" + \
+            "Do not use markdown or bullet points in your output.\n" + \
+            "Brackets [] are REQUIRED only for Search action.\n" + \
+            "If your previous output had invalid format, immediately retry with the exact contract."
         self.system = enhanced_prompt
         self.messages = []
         self.messages.append({"role": "system", "content": self.system})
@@ -83,14 +79,23 @@ class Agent:
             response_msg = response.choices[0].message
             ai_output = response_msg.content
 
-            # 打印AI的思考和行動
-            print(ai_output)
+            is_final_action = "Action: Final Answer" in ai_output or "Action:Final Answer" in ai_output
+
+            # 最終答案回合不先打印，避免與外層 print(agent.execute(...)) 重複
+            if not is_final_action:
+                print(ai_output)
 
             # 將AI的輸出添加到消息歷史
             self.messages.append({"role": "assistant", "content": ai_output})
 
             # 解析 Action
-            if "Action: Final Answer" in ai_output or "Action:Final Answer" in ai_output:
+            if is_final_action:
+                # 最終回合仍顯示 Thought，避免使用者看不到推理狀態
+                for line in ai_output.split("\n"):
+                    if line.strip().startswith("Thought:"):
+                        print(line)
+                        break
+
                 # AI認為有足夠信息提供最終答案
                 print("\n[FINAL ANSWER]")
                 print("="*80)
@@ -115,17 +120,20 @@ class Agent:
             search_match = re.search(r'Action:\s*Search\[(.*?)\]', ai_output)
             if search_match:
                 search_query = search_match.group(1)
-                print(f"\n[Search Query Detected: {search_query}]")
 
                 # 執行搜索並等待結果
-                print("[Executing search...]")
                 search_result = tools.tavily_query(search_query, max_results=1)
-                print("[Search completed]")
 
-                # 構造 Observation 並讓AI處理
-                observation_content = f"Observation: Here are the search results for '{search_query}':\n\n"
-                observation_content += json.dumps(search_result,
-                                                  ensure_ascii=False, indent=2)
+                # 構造 observation：只保留 content
+                contents = [item.get("content", "").strip()
+                            for item in search_result.get("results", [])
+                            if item.get("content", "").strip()]
+                if not contents and search_result.get("answer", "").strip():
+                    contents = [search_result.get("answer", "").strip()]
+
+                merged_content = "\n\n".join(
+                    contents) if contents else "No relevant content found."
+                observation_content = f"[observation]\n{merged_content}"
 
                 # 添加 Observation 到消息歷史，讓AI根據結果繼續思考
                 self.messages.append(
@@ -135,7 +143,7 @@ class Agent:
                 # 沒有找到有效的 Action，可能是格式問題
                 print("\n[Warning: Could not parse Action. Retrying...]")
                 self.messages.append(
-                    {"role": "user", "content": "Please provide your response in the correct format: Thought: ... then Action: Search[query] or Action: Final Answer"})
+                    {"role": "user", "content": "Invalid format. Retry exactly with: Line1 Thought: ... Line2 Action: Search[query] or Action: Final Answer. If Final Answer, add Line3 Answer: ..."})
 
             iteration += 1
 
